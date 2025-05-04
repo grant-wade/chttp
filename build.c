@@ -83,7 +83,7 @@ int main(int argc, char** argv) {
     command_t* copy_cmd = cbuild_command("copy server exe to root", "cp ./build/server server");
     cbuild_target_add_post_command(server, copy_cmd);
 
-    cbuild_register_subcommand("run", server, "./server", NULL, NULL);
+    cbuild_register_subcommand("run", server, "./server -v -d .", NULL, NULL);
     cbuild_register_subcommand("submit", NULL, "./scripts/submit.sh", NULL, NULL);
     cbuild_register_subcommand("vendor", NULL, "./scripts/download.sh", NULL, NULL);
 

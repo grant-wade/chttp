@@ -64,7 +64,7 @@ CHTTP uses a modern, type-safe CLI system (`cli.h`). All options support both sh
 
 | Option             | Description                        | Default   |
 |--------------------|------------------------------------|-----------|
-| `-p`, `--port`     | Port to listen on                  | `4221`    |
+| `-p`, `--port`     | Port to listen on                  | `8080`    |
 | `-d`, `--directory`| Directory to serve static files    | `/tmp`    |
 | `-v`, `--verbose`  | Enable verbose logging             | false     |
 | `-h`, `--help`     | Show help message                  |           |
@@ -99,12 +99,12 @@ bool my_layer_fn(HttpRequest* req, HttpResponse* res) {
 
 int main(int argc, char* argv[]) {
     // Parse CLI options (see cli.h for details)
-    int port = 8080;
-    bool verbose = false;
+    int port;
+    bool verbose;
 
     // optional CLI library
     CLI_BEGIN(opts, argc, argv)
-        CLI_INT('p', "port", port, 4221, "Port to listen on")
+        CLI_INT('p', "port", port, 8080, "Port to listen on")
         CLI_FLAG('v', "verbose", verbose, "Enable verbose logging")
     CLI_END(opts)
 

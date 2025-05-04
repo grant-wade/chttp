@@ -23,10 +23,8 @@ HttpRequest* http_request_new(void* tag) {
     }
 
     request->request_line.method = HTTP_UNKNOWN;
-    request->request_line.target = string_new_empty(tag);
     request->request_line.version = HTTP_UNKNOWN_VERSION;
     request->tag = tag;
-    request->body = string_new_empty(tag);
 
     if (!HeaderArray_init(request->headers, tag)) {
         printf("Failed to initialize headers array\n");
@@ -41,8 +39,13 @@ void http_request_free(HttpRequest* request) {
     if (!request) return;
 
     string_free(request->request_line.target);
-    HeaderArray_destroy(request->headers);
     string_free(request->body);
+    for (size_t i = 0; i < HeaderArray_size(request->headers); i++) {
+        Header* header = &request->headers->data[i];
+        string_free(header->key);
+        string_free(header->value);
+    }
+    HeaderArray_destroy(request->headers);
     pfree(request);
 }
 
@@ -59,7 +62,11 @@ void http_request_print(const HttpRequest* request) {
         printf("Header: %s: %s\n", header->key->data, header->value->data);
     }
 
-    printf("Body: %s\n", request->body->data);
+    if (request->body) {
+        printf("Body: %s\n", request->body->data);
+    } else {
+        printf("No body\n");
+    }
 }
 
 bool http_request_parse(HttpRequest* request, String* raw) {
@@ -186,10 +193,16 @@ HttpResponse* http_response_new(void* tag) {
 void http_response_free(HttpResponse* response) {
     if (!response) return;
 
+    for (size_t i = 0; i < HeaderArray_size(response->headers); i++) {
+        Header* header = &response->headers->data[i];
+        string_free(header->key);
+        string_free(header->value);
+    }
     HeaderArray_destroy(response->headers);
     string_free(response->body);
     if (response->raw_body) {
         // no not a mistake this will be allocated by zlib
+        // TODO: make a shim for our allocators for zlib
         free(response->raw_body);
     }
     pfree(response);
@@ -203,7 +216,7 @@ void http_response_print(const HttpResponse* response) {
         Header* header = HeaderArray_get_ptr(response->headers, i);
         printf("Header: %s: %s\n", string_cstr(header->key), string_cstr(header->value));
     }
-    printf("Body: %s\n", response->body->data);
+    printf("Body: %s\n", string_cstr(response->body));
 }
 
 bool http_response_send(const HttpResponse* response, int client_fd) {
