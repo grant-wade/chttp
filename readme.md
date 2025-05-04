@@ -78,7 +78,7 @@ Example:
 
 ## Server API Overview
 
-The server is built around a modular API that allows you to compose your own server with routers, layers, and built-in middleware.
+The server is built around a modular API that allows you to compose your own server with routes and layers.
 
 ### Creating and Running a Server
 
@@ -200,25 +200,6 @@ layers_add(server.layer_ctx, LAYER_PRE_ROUTE, "logger", log_layer, false);
 ### Full Example
 
 See `src/main.c` for a complete example of server setup, CLI parsing, and middleware/route registration.
-
-## Project Structure
-
-```
-chttp/
-├── build.c           # Build script (uses cbuild.h)
-├── cbuild.h          # Minimal C build system (header-only)
-├── include/          # Public headers (array, cstring, http, router, etc.)
-├── src/              # Source files
-│   ├── main.c
-│   ├── http.c
-│   ├── router.c
-│   ├── layers.c
-│   ├── routes.c
-│   └── ...
-├── vendor/           # Third-party dependencies (e.g., zlib)
-├── readme.md         # This file
-└── ...
-```
 
 ## Memory Management
 
