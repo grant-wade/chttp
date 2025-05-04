@@ -98,6 +98,9 @@ typedef struct cbuild_target target_t;
 /* Opaque handle for build commands (forward declaration) */
 typedef struct cbuild_command command_t;
 
+/* Opaque handle for subprojects (forward declaration) */
+typedef struct cbuild_subproject subproject_t;
+
 /* Subcommand callback definition */
 typedef void (*cbuild_subcommand_callback)(void *user_data);
 
@@ -190,6 +193,31 @@ void cbuild_self_rebuild_if_needed(int argc, char **argv, const char **sources, 
 /** Enable or disable generation of compile_commands.json */
 void cbuild_enable_compile_commands(int enabled);
 
+/* --- Subproject API --- */
+
+/**
+ * Declare a subproject.
+ * @param alias      An arbitrary name for this project (used to scope its proxy targets).
+ * @param directory  Path to its root (where build.c lives).
+ * @param cbuild_exe Path to the cbuild driver to invoke (usually "../cbuild").
+ * @return           A subproject handle.
+ */
+subproject_t* cbuild_add_subproject(const char *alias, const char *directory, const char *cbuild_exe);
+
+/**
+ * Fetch one of the subproject’s built targets by name.
+ * This creates a proxy target_t* in the current graph which:
+ *  - depends on the subproject build command
+ *  - has its output_file set to the subproject’s artifact path
+ *  - can be passed to cbuild_target_link_library(), cbuild_add_library_dir(), etc.
+ * @return NULL on error (no such target in the manifest).
+ */
+target_t* cbuild_subproject_get_target(subproject_t *sub, const char *tgt_name);
+
+/* Convenience macro for subproject declaration */
+#define CBUILD_SUBPROJECT(ALIAS, DIR, EXE) \
+  subproject_t *ALIAS = cbuild_add_subproject(#ALIAS, DIR, EXE)
+
 /* --- Public API: Build Execution --- */
 
 /** Execute the build. Call this in main() with the program arguments.
@@ -276,6 +304,22 @@ void cbuild_register_subcommand(const char *name, target_t *target, const char *
   } while(0)
 
 
+/* --- Helpers and utils */
+// Helper: check if a file exists
+int cbuild_file_exists(const char *path);
+
+// Helper: check if a directory exists
+int cbuild_dir_exists(const char *path);
+
+// Helper: remove a file
+int cbuild_remove_file(const char *path);
+
+// Helper: remove a directory recursively
+int cbuild_remove_dir(const char *path);
+
+// Helper: get the current working directory
+int cbuild_get_cwd(char *buf, long size);
+
 #ifdef __cplusplus
 }
 #endif
@@ -300,11 +344,17 @@ void cbuild_register_subcommand(const char *name, target_t *target, const char *
   #include <process.h>   // _beginthreadex, _spawn
   #include <direct.h>    // _mkdir
   #include <io.h>        // _access or _stat
+  #define stat _stat
+  #define unlink _unlink
+  #define rmdir _rmdir
+  #define getcwd _getcwd
+  #define PATH_MAX MAX_PATH
 #else
   #include <pthread.h>
   #include <unistd.h>
   #include <dirent.h>
   #include <fcntl.h>
+  #include <limits.h>
 #endif
 
 // --- Pretty-printing helpers (ANSI colors) ---
@@ -466,7 +516,6 @@ static char *g_ar = NULL;              // static library archiver command (ar or
 static char *g_ld = NULL;              // linker command if needed (usually same as compiler for exec/shared)
 static char *g_global_cflags = NULL;   // global compiler flags (like debug symbols, optimizations)
 static char *g_global_ldflags = NULL;  // global linker flags
-static int   g_dep_tracking = 0;       // dependency tracking disabled by default
 
 /* Global list of subcommands */
 typedef struct cbuild_subcommand {
@@ -536,7 +585,182 @@ static void* compile_thread_func(void *param);
 /* Helper macro to get max of two values */
 #define CBUILD_MAX(a,b) ((a) > (b) ? (a) : (b))
 
+/* --- Subproject types and helpers --- */
+typedef struct cbuild_subproject_target {
+    char *name;         // logical name (e.g. "zlib")
+    char *type;         // "static_lib", "shared_lib", "executable"
+    char *output_path;  // relative to subproject directory
+    struct cbuild_target *proxy_target; // created on demand
+} cbuild_subproject_target_t;
+
+struct cbuild_subproject {
+    char *alias;
+    char *directory;
+    char *cbuild_exe;
+    command_t *build_cmd; // command_t to build the subproject (runs cbuild --manifest)
+    int manifest_loaded;
+    cbuild_subproject_target_t *targets;
+    int target_count, target_cap;
+};
+
+static subproject_t **g_subprojects = NULL;
+static int g_subproject_count = 0, g_subproject_cap = 0;
+
 /* --- Implementation: Utility Functions --- */
+
+// Public Helper: check if a file exists
+int cbuild_file_exists(const char *path) {
+    if (!path || !*path) return 0;
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISREG(st.st_mode);
+}
+
+// Public Helper: check if a directory exists
+int cbuild_dir_exists(const char *path) {
+    if (!path || !*path) return 0;
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
+// Public Helper: remove a file
+int cbuild_remove_file(const char *path) {
+    if (!path || !*path) return -1;
+    if (!cbuild_file_exists(path)) return 0;
+    return unlink(path);
+}
+
+// Public Helper: remove a directory recursively
+int cbuild_remove_dir(const char *path) {
+    if (!path || !*path) return -1;
+    if (!cbuild_dir_exists(path)) return 0;
+#ifdef _WIN32
+    char cmd[PATH_MAX + 32];
+    snprintf(cmd, sizeof(cmd), "rmdir /s /q \"%s\"", path);
+    return system(cmd);
+#else
+    DIR *dir;
+    struct dirent *entry;
+    char full_path[PATH_MAX];
+    if (!(dir = opendir(path))) return -1;
+    while ((entry = readdir(dir))) {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        snprintf(full_path, sizeof(full_path), "%s/%s", path, entry->d_name);
+        struct stat st;
+        if (stat(full_path, &st) == 0 && S_ISDIR(st.st_mode)) {
+            if (cbuild_remove_dir(full_path) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        } else {
+            if (cbuild_remove_file(full_path) != 0) {
+                closedir(dir);
+                return -1;
+            }
+        }
+    }
+    closedir(dir);
+    return rmdir(path);
+#endif
+}
+
+// Public Helper: get the current working directory
+int cbuild_get_cwd(char *buf, long size) {
+    if (!buf || size <= 0) return -1;
+    return getcwd(buf, size) ? 0 : -1;
+}
+
+// Helper: join two paths with a slash
+static char *cbuild__join_path(const char *a, const char *b) {
+    size_t la = strlen(a), lb = strlen(b);
+    int need_slash = (la > 0 && a[la-1] != '/' && a[la-1] != '\\');
+    char *out = (char*)malloc(la + lb + 2);
+    strcpy(out, a);
+    if (need_slash) strcat(out, "/");
+    strcat(out, b);
+    return out;
+}
+
+// Helper: trim whitespace
+static void cbuild__trim(char *s) {
+    char *end;
+    while (*s && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')) s++;
+    end = s + strlen(s) - 1;
+    while (end > s && (*end == ' ' || *end == '\t' || *end == '\n' || *end == '\r')) *end-- = 0;
+}
+
+// Helper: parse manifest by calling subproject's cbuild with --manifest flag
+static void cbuild__parse_manifest(subproject_t *sub) {
+    if (sub->manifest_loaded) return;
+
+    // Construct the command to run the subproject's cbuild with --manifest
+    char *cmd = NULL;
+#ifdef _WIN32
+    append_format(&cmd, "cd /d \"%s\" && \"%s\" --manifest", sub->directory, sub->cbuild_exe);
+#else
+    append_format(&cmd, "cd '%s' && '%s' --manifest", sub->directory, sub->cbuild_exe);
+#endif
+
+    // Execute the command and capture its output
+    char *output = NULL;
+    int result = run_command(cmd, 1, &output);
+    free(cmd);
+
+    if (result != 0 || !output) {
+        fprintf(stderr, "cbuild: Failed to get manifest from subproject '%s'\n", sub->alias);
+        if (output) free(output);
+        return;
+    }
+
+    // Parse the output line by line
+    char *saveptr = NULL;
+    char *line = strtok_r(output, "\r\n", &saveptr);
+
+    while (line) {
+        cbuild__trim(line);
+        if (!line[0] || line[0] == '#') {
+            line = strtok_r(NULL, "\r\n", &saveptr);
+            continue;
+        }
+
+        // Format: TYPE NAME PATH
+        char *line_copy = strdup(line);
+        char *type = strtok(line_copy, " \t");
+        char *name = strtok(NULL, " \t");
+        char *path = strtok(NULL, "\r\n");
+
+        if (type && name && path) {
+            cbuild__trim(path);
+            // Add to sub->targets
+            if (sub->target_count + 1 > sub->target_cap) {
+                sub->target_cap = sub->target_cap ? sub->target_cap * 2 : 4;
+                sub->targets = realloc(sub->targets, sub->target_cap * sizeof(cbuild_subproject_target_t));
+            }
+            sub->targets[sub->target_count].name = strdup(name);
+            sub->targets[sub->target_count].type = strdup(type);
+            sub->targets[sub->target_count].output_path = strdup(path);
+            sub->targets[sub->target_count].proxy_target = NULL;
+            sub->target_count++;
+        }
+
+        free(line_copy);
+        line = strtok_r(NULL, "\r\n", &saveptr);
+    }
+
+    free(output);
+    sub->manifest_loaded = 1;
+}
+
+// Helper: find target in manifest
+static cbuild_subproject_target_t *cbuild__find_subproject_target(subproject_t *sub, const char *tgt_name) {
+    cbuild__parse_manifest(sub);
+    for (int i = 0; i < sub->target_count; ++i) {
+        if (strcmp(sub->targets[i].name, tgt_name) == 0) {
+            return &sub->targets[i];
+        }
+    }
+    return NULL;
+}
+
 
 /* ensure_capacity_charpp: ensure char** array has room for one more element (expand if needed) */
 static void ensure_capacity_charpp(char ***arr, int *count, int *capacity) {
@@ -697,86 +921,6 @@ static int need_recompile(const char *src_file, const char *obj_file, const char
     if (st_src.st_mtime > st_obj.st_mtime) {
         return 1;
     }
-    // Only check dep file if dependency tracking is enabled
-    if (g_dep_tracking) {
-        FILE *dep = fopen(dep_file, "r");
-        if (dep) {
-            char linebuf[1024];
-            char *deps = NULL;
-            size_t deps_len = 0;
-            while (fgets(linebuf, sizeof(linebuf), dep)) {
-                size_t len = strlen(linebuf);
-                if (len > 0 && linebuf[len-1] == '\n') {
-                    linebuf[len-1] = '\0';
-                    --len;
-                }
-                int continued = 0;
-                if (len > 0 && linebuf[len-1] == '\\') {
-                    continued = 1;
-                    linebuf[len-1] = '\0';
-                    --len;
-                }
-                deps = (char*) realloc(deps, deps_len + len + 1);
-                if (!deps) {
-                    fclose(dep);
-                    return 1;
-                }
-                memcpy(deps + deps_len, linebuf, len);
-                deps_len += len;
-                deps[deps_len] = '\0';
-                if (!continued) {
-                }
-            }
-            fclose(dep);
-            if (deps) {
-                char *colon = strchr(deps, ':');
-                if (colon) {
-                    colon++;
-                    while (*colon == ' ' || *colon == '\t') colon++;
-                } else {
-                    colon = deps;
-                }
-                char *token = colon;
-                while (*token) {
-                    if (*token == ' ' || *token == '\t') {
-                        token++;
-                        continue;
-                    }
-                    if (*token == '\\') {
-                        if (*(token+1) == ' ') {
-                            memmove(token, token+1, strlen(token));
-                            continue;
-                        }
-                    }
-                    char *end = token;
-                    while (*end && *end != ' ' && *end != '\t') {
-                        if (*end == '\\' && *(end+1) == ' ') {
-                            end++;
-                        }
-                        end++;
-                    }
-                    char saved = *end;
-                    *end = '\0';
-                    const char *dep_path = token;
-                    if (strcmp(dep_path, src_file) != 0) {
-                        struct stat st_dep;
-                        if (stat(dep_path, &st_dep) == 0) {
-                            if (st_dep.st_mtime > st_obj.st_mtime) {
-                                free(deps);
-                                return 1;
-                            }
-                        } else {
-                            free(deps);
-                            return 1;
-                        }
-                    }
-                    *end = saved;
-                    token = end;
-                }
-                free(deps);
-            }
-        }
-    }
     return 0;
 }
 
@@ -791,10 +935,6 @@ static int compile_source(const char *src_file, const char *obj_file, const char
     append_str(&cmd, "/showIncludes ");
 #else
     append_format(&cmd, "-c -o \"%s\" ", obj_file);
-    // Only add dependency flags if enabled
-    if (g_dep_tracking) {
-        append_format(&cmd, "-MMD -MF \"%s\" ", dep_file);
-    }
 #endif
     if (g_global_cflags) {
         append_format(&cmd, "%s ", g_global_cflags);
@@ -932,6 +1072,84 @@ void cbuild_register_subcommand(const char *name, target_t *target, const char *
     g_subcommands[g_subcommand_count++] = scmd;
 }
 
+/* --- Subproject API: Add a subproject to the build system --- */
+
+subproject_t* cbuild_add_subproject(const char *alias, const char *directory, const char *cbuild_exe) {
+    subproject_t *sub = (subproject_t*)calloc(1, sizeof(subproject_t));
+    sub->alias = strdup(alias);
+    sub->directory = strdup(directory);
+    sub->cbuild_exe = strdup(cbuild_exe);
+
+    // Build command to build the subproject's targets
+    char *cmdline = NULL;
+#ifdef _WIN32
+    append_format(&cmdline, "cd /d \"%s\" && \"%s\"", directory, cbuild_exe);
+#else
+    append_format(&cmdline, "cd '%s' && '%s'", directory, cbuild_exe);
+#endif
+    char build_cmd_name[256];
+    snprintf(build_cmd_name, sizeof(build_cmd_name), "build subproject %s", alias);
+    sub->build_cmd = cbuild_command(build_cmd_name, cmdline);
+    free(cmdline);
+
+    // Register in global subproject list
+    if (g_subproject_count + 1 > g_subproject_cap) {
+        g_subproject_cap = g_subproject_cap ? g_subproject_cap * 2 : 4;
+        g_subprojects = realloc(g_subprojects, g_subproject_cap * sizeof(subproject_t*));
+    }
+    g_subprojects[g_subproject_count++] = sub;
+    return sub;
+}
+
+target_t* cbuild_subproject_get_target(subproject_t *sub, const char *tgt_name) {
+    if (!sub) return NULL;
+    cbuild_subproject_target_t *stgt = cbuild__find_subproject_target(sub, tgt_name);
+    if (!stgt) {
+        fprintf(stderr, "cbuild: Subproject '%s' has no target named '%s'\n", sub->alias, tgt_name);
+        return NULL;
+    }
+    if (stgt->proxy_target) return stgt->proxy_target;
+
+    // Create a proxy target_t
+    cbuild_target_type type;
+    if (strcmp(stgt->type, "static_lib") == 0) {
+        type = TARGET_STATIC_LIB;
+    } else if (strcmp(stgt->type, "shared_lib") == 0) {
+        type = TARGET_SHARED_LIB;
+    } else if (strcmp(stgt->type, "executable") == 0) {
+        type = TARGET_EXECUTABLE;
+    } else {
+        fprintf(stderr, "cbuild: Unknown subproject target type: %s\n", stgt->type);
+        return NULL;
+    }
+
+    // Name the proxy as "<alias>_<tgt_name>"
+    char proxy_name[256];
+    snprintf(proxy_name, sizeof(proxy_name), "%s_%s", sub->alias, stgt->name);
+    target_t *proxy = (target_t*)calloc(1, sizeof(target_t));
+    proxy->type = type;
+    proxy->name = strdup(proxy_name);
+
+    // Output file is subproject_dir + "/" + output_path
+    proxy->output_file = cbuild__join_path(sub->directory, stgt->output_path);
+    proxy->obj_dir = NULL; // not used
+
+    // Add the subproject build command as a dependency
+    proxy->commands = NULL;
+    proxy->cmd_count = proxy->cmd_cap = 0;
+    cbuild_target_add_command(proxy, sub->build_cmd);
+
+    // Add to global targets list so it can be linked
+    ensure_capacity_charpp((char***)&g_targets, &g_target_count, &g_target_cap);
+    g_targets[g_target_count++] = proxy;
+
+    stgt->proxy_target = proxy;
+    return proxy;
+}
+
+/* --- End Subproject API Implementation --- */
+
+
 /* --- Implementation: Public API Functions --- */
 
 target_t* cbuild_executable(const char *name) {
@@ -1002,10 +1220,6 @@ void cbuild_add_global_cflags(const char *flags) {
 
 void cbuild_add_global_ldflags(const char *flags) {
     append_format(&g_global_ldflags, "%s ", flags);
-}
-
-void cbuild_enable_dep_tracking(int enabled) {
-    g_dep_tracking = enabled;
 }
 
 /* Static variables for DFS build function */
@@ -1093,14 +1307,57 @@ static void fprint_json_string(FILE *f, const char *s) {
 
 int cbuild_run(int argc, char **argv) {
     cbuild_init();
+
+    // --- Subproject manifest mode ---
+    if (argc > 1 && strcmp(argv[1], "--manifest") == 0) {
+        // Print manifest: one line per target: TYPE NAME PATH
+        for (int i = 0; i < g_target_count; ++i) {
+            target_t *t = g_targets[i];
+            // Only print "real" targets (not proxy targets for subprojects)
+            if (!t->output_file || !t->name) continue;
+            // Guess type string
+            const char *type = NULL;
+            switch (t->type) {
+                case TARGET_STATIC_LIB: type = "static_lib"; break;
+                case TARGET_SHARED_LIB: type = "shared_lib"; break;
+                case TARGET_EXECUTABLE: type = "executable"; break;
+                default: continue;
+            }
+            // Output path relative to cwd (assume output_file is relative)
+            printf("%s %s %s\n", type, t->name, t->output_file);
+        }
+        return 0;
+    }
     if (argc > 1) {
         if (strcmp(argv[1], "clean") == 0) {
             cbuild_pretty_step("CLEAN", CBUILD_COLOR_YELLOW, "Cleaning build outputs...");
+
+            // First clean all subprojects
+            for (int i = 0; i < g_subproject_count; ++i) {
+                subproject_t *sub = g_subprojects[i];
+                char *clean_cmd = NULL;
+
+                cbuild_pretty_step("CLEAN", CBUILD_COLOR_YELLOW, "Cleaning subproject: %s", sub->alias);
+#ifdef _WIN32
+                append_format(&clean_cmd, "cd /d \"%s\" && \"%s\" clean", sub->directory, sub->cbuild_exe);
+#else
+                append_format(&clean_cmd, "cd '%s' && '%s' clean", sub->directory, sub->cbuild_exe);
+#endif
+                int result = run_command(clean_cmd, 0, NULL);
+                free(clean_cmd);
+
+                if (result != 0) {
+                    fprintf(stderr, "Warning: Failed to clean subproject '%s'\n", sub->alias);
+                }
+            }
+
+            // Then clean the main project
             for (int i = 0; i < g_target_count; ++i) {
                 target_t *t = g_targets[i];
-                remove_dir_recursive(t->obj_dir);
-                remove_file(t->output_file);
+                if (t->obj_dir) remove_dir_recursive(t->obj_dir);
+                if (t->output_file) remove_file(t->output_file);
             }
+
             remove_dir_recursive(g_output_dir);
             cbuild_pretty_status(1, "Clean complete.");
             return 0;
