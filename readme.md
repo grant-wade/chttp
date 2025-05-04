@@ -28,8 +28,7 @@ This project was built while following the [CodeCrafters Build Your Own HTTP Ser
 ### Prerequisites
 
 - **Linux** or **macOS** (Windows may work with minor tweaks)
-- `gcc` or `clang` (C99+)
-- `git`
+- `gcc` or `clang` (Modern C23 was used, check build.c for details)
 
 ### Build Instructions
 
