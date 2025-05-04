@@ -73,7 +73,7 @@ CHTTP uses a modern, type-safe CLI system (`cli.h`). All options support both sh
 Example:
 
 ```bash
-./server --port=8080 --directory=./public --verbose
+./server --port 8080 --directory ./public --verbose
 ```
 
 ## Server API Overview
