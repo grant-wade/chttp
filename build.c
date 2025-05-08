@@ -42,11 +42,11 @@ int main(int argc, char** argv) {
 #ifdef __APPLE__
     cbuild_add_global_cflags("-std=c2x -Wall -Wextra -Wpedantic -Werror");
 #else
-    cbuild_add_global_cflags("-std=gnu23 -Wall -Wextra -Wpedantic -Werror");
+    cbuild_add_global_cflags("-std=gnu23 -Wall -Wextra -Wpedantic -Werror -fPIC");
 #endif
 
     target_t* zlib;
-    CBUILD_STATIC_LIBRARY(zlib,
+    CBUILD_SHARED_LIBRARY(zlib,
         CBUILD_SOURCES(zlib, "vendor/zlib/adler32.c",
             "vendor/zlib/compress.c", "vendor/zlib/crc32.c",
             "vendor/zlib/deflate.c", "vendor/zlib/gzlib.c",
@@ -82,7 +82,7 @@ int main(int argc, char** argv) {
     command_t* copy_cmd = cbuild_command("copy server exe to root", "cp ./build/server server");
     cbuild_target_add_post_command(server, copy_cmd);
 
-    cbuild_register_subcommand("run", server, "./server -v -d .", NULL, NULL);
+    cbuild_register_subcommand("run", server, "./build/server", NULL, NULL);
     cbuild_register_subcommand("submit", NULL, "./scripts/submit.sh", NULL, NULL);
     cbuild_register_subcommand("vendor", NULL, "./scripts/download.sh", NULL, NULL);
 

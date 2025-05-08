@@ -1,4 +1,3 @@
-#include "server.h"
 #define CLI_IMPLEMENTATION
 
 #include <signal.h>
@@ -15,6 +14,7 @@
 #include "http.h"
 #include "router.h"
 #include "routes.h"
+#include "server.h"
 
 // setup a handler for ctrl+c
 void sigint_handler(int signum) {
@@ -30,7 +30,7 @@ void hello_handler(HttpRequest* req, HttpResponse* res) {
 }
 
 int main(int argc, char** argv) {
-    bool verbose;
+    bool verbose = false;
     int port;
     const char* directory = NULL;
 

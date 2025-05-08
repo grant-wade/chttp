@@ -20,5 +20,4 @@ bool http_server_start(HttpServer* server);
 bool http_server_stop(HttpServer* server);
 void http_server_add_builtins(HttpServer* server, bool verbose);
 
-
 #endif

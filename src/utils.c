@@ -2,9 +2,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <zlib.h>
 
 #include "utils.h"
-#include "zlib.h"
 
 
 // function to gzip String to use for the response
